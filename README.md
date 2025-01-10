@@ -1,1 +1,1 @@
-# learn-react-deeply
+# Learn the React deeply
