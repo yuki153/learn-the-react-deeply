@@ -216,3 +216,184 @@ export function markContainerAsRoot(hostRoot: Fiber, node: Container): void {
 ```
 
 ### listenToAllSupportedEvents
+
+* allNativeEvents を forEach でループして listenToNativeEvent を実行している
+  * allNativeEvents は命名の通り "click","touchstart","mouseover" 等の標準的なイベント名の配列
+
+<details>
+
+<summary>code</summary>
+
+```ts
+const listeningMarker = '_reactListening' + Math.random().toString(36).slice(2);
+
+export function listenToAllSupportedEvents(rootContainerElement: EventTarget) {
+  if (!(rootContainerElement: any)[listeningMarker]) {
+    (rootContainerElement: any)[listeningMarker] = true;
+    allNativeEvents.forEach(domEventName => {
+      // We handle selectionchange separately because it
+      // doesn't bubble and needs to be on the document.
+      if (domEventName !== 'selectionchange') {
+        if (!nonDelegatedEvents.has(domEventName)) {
+          // click, touch などはこっち
+          listenToNativeEvent(domEventName, false, rootContainerElement);
+        }
+        // play, canPlay などはこっち
+        listenToNativeEvent(domEventName, true, rootContainerElement);
+      }
+    });
+    // .....
+  }
+}
+```
+
+</details>
+
+### listenToNativeEvent
+
+1. 引数で受け取る isCapturePhaseListener の真偽値に応じて変数 eventSystemFlags に 0 or 4 を代入する
+2. addTrappedEventListener 関数を実行
+
+
+<details>
+
+<summary>code</summary>
+
+```ts
+export function listenToNativeEvent(
+  domEventName: DOMEventName,
+  isCapturePhaseListener: boolean,
+  target: EventTarget,
+): void {
+  // ...
+
+  let eventSystemFlags = 0;
+  if (isCapturePhaseListener) {
+    // 4 が代入される
+    eventSystemFlags |= IS_CAPTURE_PHASE;
+  }
+  addTrappedEventListener(
+    target,                 // HTMLElement(root)
+    domEventName,           // eventName
+    eventSystemFlags,       // 0
+    isCapturePhaseListener, // false
+  );
+}
+```
+
+</details>
+
+### addTrappedEventListener
+
+<details>
+
+<summary>code</summary>
+
+```ts
+function addTrappedEventListener(
+  targetContainer: EventTarget,                     // HTMLElement
+  domEventName: DOMEventName,                       // eventName
+  eventSystemFlags: EventSystemFlags,               // 0
+  isCapturePhaseListener: boolean,                  // false
+  isDeferredListenerForLegacyFBSupport?: boolean,   // undefined
+) {
+  let listener = createEventListenerWrapperWithPriority(
+    targetContainer,
+    domEventName,
+    eventSystemFlags,
+  );
+  
+  //...
+
+  targetContainer =
+    // false -> targetContainer がそのまま代入される
+    enableLegacyFBSupport && isDeferredListenerForLegacyFBSupport
+      ? (targetContainer: any).ownerDocument
+      : targetContainer;
+
+  let unsubscribeListener;
+  
+  // ...
+
+  if (isCapturePhaseListener) {
+    if (isPassiveListener !== undefined) {
+      unsubscribeListener = addEventCaptureListenerWithPassiveFlag(
+        targetContainer,
+        domEventName,
+        listener,
+        isPassiveListener,
+      );
+    } else {
+      unsubscribeListener = addEventCaptureListener(
+        targetContainer,
+        domEventName,
+        listener,
+      );
+    }
+  } else {
+    if (isPassiveListener !== undefined) {
+      unsubscribeListener = addEventBubbleListenerWithPassiveFlag(
+        targetContainer,
+        domEventName,
+        listener,
+        isPassiveListener,
+      );
+    } else {
+      // click event はここを通りそう
+      unsubscribeListener = addEventBubbleListener(
+        targetContainer,
+        domEventName,
+        listener,
+      );
+    }
+  }
+}
+```
+
+</details>
+
+### createEventListenerWrapperWithPriority
+
+1. 引数で受け取ったイベント名に応じて getEventPriority 関数が優先度（文字列）を返す。
+2. 優先度に応じて dispatchDiscreteEvent, dispatchContinuousEvent, dispatchEvent のいずれかの関数を bind して返す。
+    * 内部処理的には dispatchDiscreteEvent, dispatchContinuousEvent 関数のどちらも dispatchEvent 関数を最終的に実行する。なので実態は殆ど dispatchEvent 関数である。
+    * "click" イベントの場合は dispatchDiscreteEvent 関数が返される。
+    * bind で返す関数は既に domEventName, eventSystemFlags, targetContainer が渡されているので、残りの event object（nativeEvent）を引数で受け取る関数（dispatchEvent）が返る。
+
+<details>
+
+<summary>code</summary>
+
+```ts
+export function createEventListenerWrapperWithPriority(
+  targetContainer: EventTarget,
+  domEventName: DOMEventName,
+  eventSystemFlags: EventSystemFlags,
+): Function {
+  const eventPriority = getEventPriority(domEventName);
+  let listenerWrapper;
+  switch (eventPriority) {
+    case DiscreteEventPriority:
+      // click event など多くのイベントはこの case
+      listenerWrapper = dispatchDiscreteEvent;
+      break;
+    case ContinuousEventPriority:
+      listenerWrapper = dispatchContinuousEvent;
+      break;
+    case DefaultEventPriority:
+    default:
+      listenerWrapper = dispatchEvent;
+      break;
+  }
+  return listenerWrapper.bind(
+    null,
+    domEventName,
+    eventSystemFlags,
+    targetContainer,
+  );
+}
+```
+
+</details>
+
+### dispatchEvent
