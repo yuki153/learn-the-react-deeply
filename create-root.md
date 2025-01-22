@@ -40,7 +40,7 @@
 1. createContainer を実行し root（FiberRoot）を返す。
 2. markContainerAsRoot で root.current（HostRoot）を container["__reactContainer$"]へ代入する。
     *  root.current には createContainer の内部処理で HostRoot（Fiber）が代入されている。
-3. listenToAllSupportedEvents の実行により rootContainerElement の eventListener へ全ての event（"click", "touch", etc...）を登録する。
+3. listenToAllSupportedEvents の実行により rootContainerElement へ全ての event（"click", "touch", etc...）を addEventListener により登録する。イベントに対する callback 関数が実行された場合には React コンポーネントに登録された onClick, onTouchStart, onMouseOver, ...etc がイベントの発火に応じて実行される。
 
 <details>
 
@@ -127,7 +127,7 @@ export function createContainer(
 
 </details>
 
-### createFiberRoot
+### createContainer > createFiberRoot
 
 1. new FiberRoot で root(FiberRoot) を作る
 2. createHostRootFiber 実行で HostRoot(Fiber)
@@ -249,7 +249,7 @@ export function listenToAllSupportedEvents(rootContainerElement: EventTarget) {
 
 </details>
 
-### listenToNativeEvent
+### listenToAllSupportedEvents > listenToNativeEvent
 
 1. 引数で受け取る isCapturePhaseListener の真偽値に応じて変数 eventSystemFlags に 0 or 4 を代入する
 2. addTrappedEventListener 関数を実行
@@ -283,7 +283,10 @@ export function listenToNativeEvent(
 
 </details>
 
-### addTrappedEventListener
+### listenToAllSupportedEvents > listenToNativeEvent > addTrappedEventListener
+
+1. createEventListenerWrapperWithPriority 関数の実行によりイベント（domEventName）に対応する listener 関数を取得する。
+2. addEventBubbleListener により targetContainer にイベントに対する listener 関数を登録する。
 
 <details>
 
@@ -352,7 +355,7 @@ function addTrappedEventListener(
 
 </details>
 
-### createEventListenerWrapperWithPriority
+### listenToAllSupportedEvents > listenToNativeEvent > addTrappedEventListener > createEventListenerWrapperWithPriority
 
 1. 引数で受け取ったイベント名に応じて getEventPriority 関数が優先度（文字列）を返す。
 2. 優先度に応じて dispatchDiscreteEvent, dispatchContinuousEvent, dispatchEvent のいずれかの関数を bind して返す。
@@ -396,7 +399,9 @@ export function createEventListenerWrapperWithPriority(
 
 </details>
 
-### dispatchEvent
+### listenToAllSupportedEvents ~ addTrappedEventListener > createEventListenerWrapperWithPriority > dispatchEvent
+
+return_targetInst にイベント発生元の target(Node) の Fiber が入り、dispatchEvent の実態は殆ど dispatchEventForPluginEventSystem である。
 
 1. findInstanceBlockingEvent を実行
     1. 引数で受け取った nativeEvent から target(Node) を取り出す
@@ -436,7 +441,9 @@ export function dispatchEvent(
 
 </details>
 
-### dispatchEventForPluginEventSystem
+### listenToAllSupportedEvents ~ createEventListenerWrapperWithPriority > dispatchEvent > dispatchEventForPluginEventSystem
+
+batchedUpdates 関数の callback として dispatchEventsForPlugins 関数を渡して実行している。batchedUpdates 関数は恐らく state 更新された場合に再レンダリングを纏めるためのもの？とりあえず dispatchEventForPluginEventSystem の実態は 殆ど dispatchEventsForPlugins 関数と言える。
 
 <details>
 
@@ -451,102 +458,8 @@ export function dispatchEventForPluginEventSystem(
   targetContainer: EventTarget,
 ): void {
   let ancestorInst = targetInst;
-  if (
-    (eventSystemFlags & IS_EVENT_HANDLE_NON_MANAGED_NODE) === 0 &&
-    (eventSystemFlags & IS_NON_DELEGATED) === 0
-  ) {
-    const targetContainerNode = ((targetContainer: any): Node);
 
-    // If we are using the legacy FB support flag, we
-    // defer the event to the null with a one
-    // time event listener so we can defer the event.
-    if (
-      enableLegacyFBSupport &&
-      // If our event flags match the required flags for entering
-      // FB legacy mode and we are processing the "click" event,
-      // then we can defer the event to the "document", to allow
-      // for legacy FB support, where the expected behavior was to
-      // match React < 16 behavior of delegated clicks to the doc.
-      domEventName === 'click' &&
-      (eventSystemFlags & SHOULD_NOT_DEFER_CLICK_FOR_FB_SUPPORT_MODE) === 0 &&
-      !isReplayingEvent(nativeEvent)
-    ) {
-      deferClickToDocumentForLegacyFBSupport(domEventName, targetContainer);
-      return;
-    }
-    if (targetInst !== null) {
-      // The below logic attempts to work out if we need to change
-      // the target fiber to a different ancestor. We had similar logic
-      // in the legacy event system, except the big difference between
-      // systems is that the modern event system now has an event listener
-      // attached to each React Root and React Portal Root. Together,
-      // the DOM nodes representing these roots are the "rootContainer".
-      // To figure out which ancestor instance we should use, we traverse
-      // up the fiber tree from the target instance and attempt to find
-      // root boundaries that match that of our current "rootContainer".
-      // If we find that "rootContainer", we find the parent fiber
-      // sub-tree for that root and make that our ancestor instance.
-      let node: null | Fiber = targetInst;
-
-      mainLoop: while (true) {
-        if (node === null) {
-          return;
-        }
-        const nodeTag = node.tag;
-        if (nodeTag === HostRoot || nodeTag === HostPortal) {
-          let container = node.stateNode.containerInfo;
-          if (isMatchingRootContainer(container, targetContainerNode)) {
-            break;
-          }
-          if (nodeTag === HostPortal) {
-            // The target is a portal, but it's not the rootContainer we're looking for.
-            // Normally portals handle their own events all the way down to the root.
-            // So we should be able to stop now. However, we don't know if this portal
-            // was part of *our* root.
-            let grandNode = node.return;
-            while (grandNode !== null) {
-              const grandTag = grandNode.tag;
-              if (grandTag === HostRoot || grandTag === HostPortal) {
-                const grandContainer = grandNode.stateNode.containerInfo;
-                if (
-                  isMatchingRootContainer(grandContainer, targetContainerNode)
-                ) {
-                  // This is the rootContainer we're looking for and we found it as
-                  // a parent of the Portal. That means we can ignore it because the
-                  // Portal will bubble through to us.
-                  return;
-                }
-              }
-              grandNode = grandNode.return;
-            }
-          }
-          // Now we need to find it's corresponding host fiber in the other
-          // tree. To do this we can use getClosestInstanceFromNode, but we
-          // need to validate that the fiber is a host instance, otherwise
-          // we need to traverse up through the DOM till we find the correct
-          // node that is from the other tree.
-          while (container !== null) {
-            const parentNode = getClosestInstanceFromNode(container);
-            if (parentNode === null) {
-              return;
-            }
-            const parentTag = parentNode.tag;
-            if (
-              parentTag === HostComponent ||
-              parentTag === HostText ||
-              parentTag === HostHoistable ||
-              parentTag === HostSingleton
-            ) {
-              node = ancestorInst = parentNode;
-              continue mainLoop;
-            }
-            container = container.parentNode;
-          }
-        }
-        node = node.return;
-      }
-    }
-  }
+  // ...略
 
   batchedUpdates(() =>
     dispatchEventsForPlugins(
@@ -562,3 +475,266 @@ export function dispatchEventForPluginEventSystem(
 ```
 
 </details>
+
+### listenToAllSupportedEvents ~ dispatchEvent > dispatchEventForPluginEventSystem > dispatchEventsForPlugins
+
+1. dispatchQueue 配列を用意する
+2. extractEvents が実行される
+    * extractEvents 実行の過程でイベント発生元及び、その親コンポーネントで定義されている onXXXX（event listener）関数を含んだ配列が dispatchQueue の配列に push される。
+3. processDispatchQueue 関数の実行で dispatchQueue 配列内の onXXXX 関数を取り出して実行する。onXXXX はイベント発生元で定義された関数だけでなく、親で定義された同様のイベントリスナー関数も for 文のループ内で実行されるため、このような仕組みで純粋なイベントのバブリングに伴うイベントリスナの実行を再現している。
+
+<details>
+
+<summary>code</summary>
+
+```ts
+function dispatchEventsForPlugins(
+  domEventName: DOMEventName,
+  eventSystemFlags: EventSystemFlags,
+  nativeEvent: AnyNativeEvent,
+  targetInst: null | Fiber,
+  targetContainer: EventTarget,
+): void {
+  // event object から target(Node) を取得
+  const nativeEventTarget = getEventTarget(nativeEvent);
+  const dispatchQueue: DispatchQueue = [];
+  extractEvents(
+    dispatchQueue,
+    domEventName,
+    targetInst,
+    nativeEvent,
+    nativeEventTarget,
+    eventSystemFlags,
+    targetContainer,
+  );
+  processDispatchQueue(dispatchQueue, eventSystemFlags);
+}
+```
+
+</details>
+
+### listenToAllSupportedEvents ~ dispatchEventForPluginEventSystem > dispatchEventsForPlugins > extractEvents
+
+発生したイベントに応じて適切な XXXEventPlugin オブジェクトの extractEvents 関数を実行する。
+
+<details>
+
+<summary>code</summary>
+
+```ts
+function extractEvents(
+  dispatchQueue: DispatchQueue,
+  domEventName: DOMEventName,
+  targetInst: null | Fiber,
+  nativeEvent: AnyNativeEvent,
+  nativeEventTarget: null | EventTarget,
+  eventSystemFlags: EventSystemFlags,
+  targetContainer: EventTarget,
+) {
+  // 多くは SimpleEventPlugin の extractEvents が実行される
+  SimpleEventPlugin.extractEvents(
+    dispatchQueue,
+    domEventName,
+    targetInst,
+    nativeEvent,
+    nativeEventTarget,
+    eventSystemFlags,
+    targetContainer,
+  );
+  const shouldProcessPolyfillPlugins =
+    (eventSystemFlags & SHOULD_NOT_PROCESS_POLYFILL_EVENT_PLUGINS) === 0;
+
+  if (shouldProcessPolyfillPlugins) {
+    EnterLeaveEventPlugin.extractEvents(
+      // ...
+    );
+    ChangeEventPlugin.extractEvents(
+      // ...
+    );
+    SelectEventPlugin.extractEvents(
+      // ...
+    );
+    BeforeInputEventPlugin.extractEvents(
+      // ...
+    );
+    FormActionEventPlugin.extractEvents(
+      // ...
+    );
+  }
+}
+```
+
+</details>
+
+### listenToAllSupportedEvents ~  dispatchEventsForPlugins > extractEvents > SimpleEventPlugin.extractEvents
+
+1. 発生したイベントに応じて event listener 関数に渡す event オブジェクトを決定する。
+    * Switch 文で SyntheticEventCtor に適切な event オブジェクトを代入する。
+2. accumulateSinglePhaseListeners 関数（イベントがバブリングフェーズで捕捉されると仮定して）が実行される。
+    1. イベント発生元の Fiber の stateNode(instance).canonical.currentProps から onXXXX（event listener）関数を取り出す。
+    2. 親 Tree 上に存在する Fiber を辿り、同様の onXXXX イベントを取り出す。
+    3. listeners（{instance, listener, eventTarget}[]）として返す。
+3. dispatchQueue（配列）に { event: ReactSyntheticEvent, listeners } オブジェクトを push する。
+
+<details>
+
+<summary>code</summary>
+
+```ts
+function extractEvents(
+  dispatchQueue: DispatchQueue,
+  domEventName: DOMEventName,
+  targetInst: null | Fiber,
+  nativeEvent: AnyNativeEvent,
+  nativeEventTarget: null | EventTarget,
+  eventSystemFlags: EventSystemFlags,
+  targetContainer: EventTarget,
+): void {
+  // click -> onClick
+  const reactName = topLevelEventsToReactNames.get(domEventName);
+  if (reactName === undefined) {
+    return;
+  }
+  let SyntheticEventCtor = SyntheticEvent;
+  let reactEventType: string = domEventName;
+
+  switch (domEventName) {
+    case 'keypress':
+      // firefox にて function キーが反応してしまうので無効にする
+      if (getEventCharCode(((nativeEvent: any): KeyboardEvent)) === 0) {
+        return;
+      }
+    /* falls through */
+    case 'keydown':
+    case 'keyup':
+      SyntheticEventCtor = SyntheticKeyboardEvent;
+      break;
+    case 'focusin':
+      reactEventType = 'focus';
+      SyntheticEventCtor = SyntheticFocusEvent;
+      break;
+    case 'focusout':
+      reactEventType = 'blur';
+      SyntheticEventCtor = SyntheticFocusEvent;
+      break;
+    case 'beforeblur':
+    case 'afterblur':
+      SyntheticEventCtor = SyntheticFocusEvent;
+      break;
+    case 'click':
+      // firefox にて右クリックが反応してしまうので無効にする
+      if (nativeEvent.button === 2) {
+        return;
+      }
+    // ...
+    case 'touchcancel':
+    case 'touchend':
+    case 'touchmove':
+    case 'touchstart':
+      SyntheticEventCtor = SyntheticTouchEvent;
+      break;
+    // ...
+    default:
+      // Unknown event. This is used by createEventHandle.
+      break;
+  }
+
+  const inCapturePhase = (eventSystemFlags & IS_CAPTURE_PHASE) !== 0;
+  if (
+    enableCreateEventHandleAPI &&
+    eventSystemFlags & IS_EVENT_HANDLE_NON_MANAGED_NODE
+  ) {
+    // キャプチャーフェーズで捕捉する event
+    const listeners = accumulateEventHandleNonManagedNodeListeners(
+      // TODO: this cast may not make sense for events like
+      // "focus" where React listens to e.g. "focusin".
+      ((reactEventType: any): DOMEventName),
+      targetContainer,
+      inCapturePhase,
+    );
+    if (listeners.length > 0) {
+      // Intentionally create event lazily.
+      const event: ReactSyntheticEvent = new SyntheticEventCtor(
+        reactName,         // onClick
+        reactEventType,    // click
+        null,
+        nativeEvent,       // event object
+        nativeEventTarget, // event.target
+      );
+      dispatchQueue.push({event, listeners});
+    }
+  } else {
+    const accumulateTargetOnly =
+      !inCapturePhase &&
+      (domEventName === 'scroll' || domEventName === 'scrollend');
+    // バブリングフェーズで捕捉する event
+    const listeners = accumulateSinglePhaseListeners(
+      targetInst,
+      reactName,
+      nativeEvent.type,
+      inCapturePhase,
+      accumulateTargetOnly,
+      nativeEvent,
+    );
+    if (listeners.length > 0) {
+      // Intentionally create event lazily.
+      const event: ReactSyntheticEvent = new SyntheticEventCtor(
+        reactName,
+        reactEventType,
+        null,
+        nativeEvent,
+        nativeEventTarget,
+      );
+      // { ReactSyntheticEvent, [{instance, listener: (e:ReactSyntheticEvent) => void, lastHostComponent}] }
+      dispatchQueue.push({event, listeners});
+    }
+  }
+}
+```
+
+</details>
+
+### listenToAllSupportedEvents ~ dispatchEventForPluginEventSystem > dispatchEventsForPlugins > processDispatchQueue
+
+```ts
+export function processDispatchQueue(
+  dispatchQueue: DispatchQueue,
+  eventSystemFlags: EventSystemFlags,
+): void {
+  const inCapturePhase = (eventSystemFlags & IS_CAPTURE_PHASE) !== 0;
+  for (let i = 0; i < dispatchQueue.length; i++) {
+    const {event, listeners} = dispatchQueue[i];
+    processDispatchQueueItemsInOrder(event, listeners, inCapturePhase);
+    //  event system doesn't use pooling.
+  }
+}
+```
+
+### listenToAllSupportedEvents ~ dispatchEventsForPlugins > processDispatchQueue > processDispatchQueueItemsInOrder
+
+```ts
+function processDispatchQueueItemsInOrder(
+  event: ReactSyntheticEvent,
+  dispatchListeners: Array<DispatchListener>,
+  inCapturePhase: boolean,
+): void {
+  let previousInstance;
+  if (inCapturePhase) {
+    // ...
+  } else {
+    for (let i = 0; i < dispatchListeners.length; i++) {
+      const {instance, currentTarget, listener} = dispatchListeners[i];
+      if (instance !== previousInstance && event.isPropagationStopped()) {
+        return;
+      }
+      if (__DEV__ && enableOwnerStacks && instance !== null) {
+        // ...
+      } else {
+        // React Component の listener（onClick）の実行
+        executeDispatch(event, listener, currentTarget);
+      }
+      previousInstance = instance;
+    }
+  }
+}
+```
